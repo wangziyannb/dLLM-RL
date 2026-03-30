@@ -180,11 +180,12 @@ def _llm_worker_run(args):
 
         # Collect results incrementally so we can return partials on any exit
         for j, o in enumerate(outs):
-            triples.append((
-                indices_slice[j],
-                o["text"],
-                o.get("first_unmask_times", None)
-            ))
+                triples.append((
+                    indices_slice[j],
+                    o["text"],
+                    o.get("first_unmask_times", None),
+                    o.get("confidence_summary", None),
+                ))
     except BaseException as e:
         # Swallow SystemExit/KeyboardInterrupt/etc. so we can return partials
         print(f"[worker pid={os.getpid()}] Caught {type(e).__name__}: {e}. Returning partial results ({len(triples)})", flush=True)
@@ -412,6 +413,7 @@ if __name__ == "__main__":
         data[i]["step_map"] = []
         data[i]["extracted_output"] = []
         data[i]["response_length"] = []
+        data[i]["confidence_summary"] = []
         data[i]["prompt"] = get_prompt(data[i])
     
 
@@ -545,7 +547,8 @@ if __name__ == "__main__":
                 seq_pairs.append( (
                     index_chunks[0][j],
                     o["text"],
-                    o.get("first_unmask_times", None)
+                    o.get("first_unmask_times", None),
+                    o.get("confidence_summary", None),
                 ) )
         finally:
             _cleanup()
@@ -615,15 +618,21 @@ if __name__ == "__main__":
 
     restored_outputs = [None] * N
     restored_steps   = [None] * N
+    restored_confidence = [None] * N
 
     for item in seq_pairs:
         if len(item) == 2:
             gi, text = item
             steps = None
-        else:
+            confidence_summary = None
+        elif len(item) == 3:
             gi, text, steps = item
+            confidence_summary = None
+        else:
+            gi, text, steps, confidence_summary = item
         restored_outputs[gi] = text
         restored_steps[gi]   = steps
+        restored_confidence[gi] = confidence_summary
 
 
     for i in range(N):
@@ -674,10 +683,12 @@ if __name__ == "__main__":
         index_i = index_list[i]
         data[index_i]["full_output"].append(full_output)
         step_map_i = restored_steps[i] if restored_steps[i] is not None else []
+        confidence_summary_i = restored_confidence[i] if restored_confidence[i] is not None else None
         #print(step_map_i)
         data[index_i]["step_map"].append(step_map_i)
         data[index_i]["extracted_output"].append(extracted_output)
         data[index_i]["response_length"].append(response_length[i])
+        data[index_i]["confidence_summary"].append(confidence_summary_i)
         i += 1
 
     # output the data
@@ -688,6 +699,5 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(output_file_name), exist_ok=True)
     with open(output_file_name, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-
 
 

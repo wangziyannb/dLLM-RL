@@ -68,6 +68,19 @@ class Sequence:
         self.num_cached_tokens = 0
         self.block_table = []
 
+        # Lightweight confidence/debug aggregates for later analysis.
+        self.total_denoise_rounds = 0
+        self.total_masked_positions = 0
+        self.sum_masked_sampled_prob = 0.0
+        self.total_accepted_positions = 0
+        self.sum_accepted_sampled_prob = 0.0
+        self.total_dynamic_rounds = 0
+        self.total_above_threshold_positions = 0
+        self.sum_above_threshold_fraction = 0.0
+        self.sum_accepted_fraction = 0.0
+        self.dynamic_fallback_rounds = 0
+        self.block_rounds_history: list[int] = []
+
     def __len__(self):
         return self.num_tokens
 
@@ -86,6 +99,60 @@ class Sequence:
         self.current_denoising_step = 0
         self.intermediate_block_tokens = [self.mask_token_id] * self.block_length
         self.status = SequenceStatus.DENOISING
+
+    def record_denoise_round(
+        self,
+        *,
+        masked_probs,
+        accepted_probs,
+        num_above_threshold: int | None = None,
+        fallback_triggered: bool = False,
+    ) -> None:
+        masked_count = int(masked_probs.numel())
+        accepted_count = int(accepted_probs.numel())
+
+        self.total_denoise_rounds += 1
+        self.total_accepted_positions += accepted_count
+        if accepted_count > 0:
+            self.sum_accepted_sampled_prob += float(accepted_probs.sum().item())
+
+        if masked_count <= 0:
+            return
+
+        self.total_masked_positions += masked_count
+        self.sum_masked_sampled_prob += float(masked_probs.sum().item())
+        self.sum_accepted_fraction += accepted_count / masked_count
+
+        if num_above_threshold is not None:
+            self.total_dynamic_rounds += 1
+            self.total_above_threshold_positions += num_above_threshold
+            self.sum_above_threshold_fraction += num_above_threshold / masked_count
+            if fallback_triggered:
+                self.dynamic_fallback_rounds += 1
+
+    def record_completed_block(self) -> None:
+        self.block_rounds_history.append(self.current_denoising_step)
+
+    def export_confidence_summary(self) -> dict[str, float | int | str | None]:
+        def safe_div(num: float, den: int) -> float | None:
+            if den <= 0:
+                return None
+            return num / den
+
+        return {
+            "remasking_strategy": self.remasking_strategy,
+            "dynamic_threshold": self.dynamic_threshold,
+            "denoise_rounds": self.total_denoise_rounds,
+            "completed_blocks": len(self.block_rounds_history),
+            "avg_rounds_per_block": safe_div(float(sum(self.block_rounds_history)), len(self.block_rounds_history)),
+            "avg_masked_sampled_prob": safe_div(self.sum_masked_sampled_prob, self.total_masked_positions),
+            "avg_accepted_sampled_prob": safe_div(self.sum_accepted_sampled_prob, self.total_accepted_positions),
+            "avg_above_threshold_fraction": safe_div(self.sum_above_threshold_fraction, self.total_dynamic_rounds),
+            "avg_above_threshold_count": safe_div(float(self.total_above_threshold_positions), self.total_dynamic_rounds),
+            "avg_accepted_fraction_of_masked": safe_div(self.sum_accepted_fraction, self.total_denoise_rounds),
+            "avg_accepted_tokens_per_denoise_round": safe_div(float(self.total_accepted_positions), self.total_denoise_rounds),
+            "fallback_round_fraction": safe_div(float(self.dynamic_fallback_rounds), self.total_dynamic_rounds),
+        }
 
     '''
     def commit_block(self, block_tokens: list[int]):
@@ -218,12 +285,19 @@ class Sequence:
         # Simplified for multiprocessing; customize as needed
         return (self.seq_id, self.status, self.token_ids, self.num_tokens, self.num_prompt_tokens, 
                 self.num_cached_tokens, self.block_table, self.intermediate_block_tokens, self.current_denoising_step,
-                self.first_unmask_steps, self.block_first_unmask_steps, self.global_denoising_step)
+                self.first_unmask_steps, self.block_first_unmask_steps, self.global_denoising_step,
+                self.total_denoise_rounds, self.total_masked_positions, self.sum_masked_sampled_prob,
+                self.total_accepted_positions, self.sum_accepted_sampled_prob, self.total_dynamic_rounds,
+                self.total_above_threshold_positions, self.sum_above_threshold_fraction,
+                self.sum_accepted_fraction, self.dynamic_fallback_rounds, self.block_rounds_history)
 
     def __setstate__(self, state):
         (self.seq_id, self.status, self.token_ids, self.num_tokens, self.num_prompt_tokens, 
          self.num_cached_tokens, self.block_table, self.intermediate_block_tokens, self.current_denoising_step,
-         self.first_unmask_steps, self.block_first_unmask_steps, self.global_denoising_step) = state
+         self.first_unmask_steps, self.block_first_unmask_steps, self.global_denoising_step,
+         self.total_denoise_rounds, self.total_masked_positions, self.sum_masked_sampled_prob,
+         self.total_accepted_positions, self.sum_accepted_sampled_prob, self.total_dynamic_rounds,
+         self.total_above_threshold_positions, self.sum_above_threshold_fraction,
+         self.sum_accepted_fraction, self.dynamic_fallback_rounds, self.block_rounds_history) = state
     
     
-

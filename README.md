@@ -1,300 +1,173 @@
-<div align="center">
-  <br>
-  <img src="assets/logo.png" width="200">
-  <h3>Revolutionizing Reinforcement Learning Framework for Diffusion Large Language Models</h3>
-  <h4>Most comprehensive framework for dLLM's and multimodal dLLM's post-training</h4>
-</div>
+# TraDo-8B-Thinking ablation pipeline
 
+这套 pipeline 是给 `Gen-Verse/TraDo-8B-Thinking`（以及同类 TraDo block diffusion model）做 **throughput / performance trade-off** 实验用的，目标是直接回答两件事：
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2509.06949">
-    <img
-      src="https://img.shields.io/badge/Paper-Arxiv-red?logo=arxiv&logoColor=red"
-      alt="CURE Paper on arXiv"
-    />
-  <a href="https://huggingface.co/collections/Gen-Verse/trado-series-68beb6cd6a26c27cde9fe3af">
-    <img 
-        src="https://img.shields.io/badge/Datasets-Hugging%20Face%20Data-orange?logo=huggingface&logoColor=yellow" 
-        alt="Coding Datasets on Hugging Face"
-    />
-  </a>
-  <a href="https://huggingface.co/collections/Gen-Verse/trado-series-68beb6cd6a26c27cde9fe3af">
-    <img 
-        src="https://img.shields.io/badge/TraDo%204B/8B-Hugging%20Face%20Model-FFCC00?logo=huggingface&logoColor=yellow" 
-        alt="ReasonFlux Coders on Hugging Face"
-    />
-  </a>
-    <a href="https://yinjjiew.github.io/projects/dllmrl/">
-    <img
-      src="https://img.shields.io/badge/Blog-TraceRL-blue?logo=rss&logoColor=white"
-      alt="Blog"
-    />
-  </a>
-</p>
+1. **block size sweep**：不同 `block_size` 对吞吐和精度的影响。
+2. **confidence-based parallel decoding sweep**：固定 block size，只扫 `dynamic_threshold`，观察并行解码激进程度对吞吐和精度的影响。
 
+它围绕官方 `dLLM-RL` 仓库的推理/评测入口，不重写采样器，只负责：
 
+- 自动准备/下载 `GSM8K` 与 `MATH500`；
+- 自动生成每个 ablation point 的 config；
+- 调用官方 `sample/trado_sample.py` 与 `reward/reward.py`；
+- 统计 generation throughput、accuracy、平均输出长度；
+- 如果 `output_unmasking_history=True`，额外统计 **realized parallelism**；
+- 输出 CSV/JSON，并画 trade-off 图。
 
+## 为什么要把两组 sweep 分开
 
-<p align="center">
-  <img src="assets/figure1.png"  alt="Overview"  width="750">
-</p>
+### A. block size sweep
+如果你把 `block_size` 从 4 改到 8，但 `denoising_steps_per_block` 仍固定为 4，那么你同时改了两件事：
 
+- block 内 token 数变大；
+- 每一步最少会 transfer 的 token 数也变大。
 
+这会把 **block granularity** 和 **parallel decoding aggressiveness** 混在一起。
 
-## 🌱 Features 
+所以本 pipeline 默认采用：
 
-- **Model Support**: [TraDo](https://arxiv.org/abs/2509.06949), [SDAR](https://github.com/JetAstra/SDAR), [Dream](https://github.com/DreamLM/Dream), [LLaDA](https://github.com/ML-GSAI/LLaDA), [MMaDA](https://github.com/Gen-Verse/MMaDA), [LLaDA-V](https://github.com/ML-GSAI/LLaDA-V), and [Diffu-Coder](https://github.com/apple/ml-diffucoder) Almost all open-sourced discrete diffusion language models are supported here.
-- **Diverse Settings**: We support deployment, **SFT**, **RL** (with **optional value model** for variance reduction and **process reward model** for fine-grained supervision), and **RLHF** across diverse settings (**math, coding, multimodal**) and different architectures (**both full/block attention dLLMs**).
-- **Inference Acceleration**: improved [KV-cache](https://github.com/NVlabs/Fast-dLLM/tree/main), [jetengine](https://github.com/Labman42/JetEngine/tree/0ddc55ad3fb712b6374515b78d656f420e1a7243) (based on nano-vllm), different sampling strategies, support multi-nodes, easy to build your own accelerated inference methods.
-- **RL Training**: [TraceRL (support diffusion value model)](https://arxiv.org/abs/2509.06949), [coupled RL](https://github.com/apple/ml-diffucoder), [random masking RL](https://github.com/Gen-Verse/MMaDA), accelerated sampling, including Math, coding, and general RL tasks, support multi-nodes, easy to build your reinforcement learning methods across diverse settings
-- **SFT**: [Block SFT](https://github.com/kuleshov-group/bd3lms), semi-AR SFT, random masking SFT, support multi-nodes and long-CoT finetune.
+- `block_size ∈ {2, 4, 8, 16}`
+- `denoising_steps_per_block = block_size`
 
+### B. confidence-based parallel decoding sweep
+固定：
 
+- `block_size = 4`
+- `denoising_steps_per_block = 4`
+- `remasking_strategy = low_confidence_dynamic`
 
-## 🧠 RL Methods (TraceRL) & Models (TraDo)
+只扫：
 
-We propose **TraceRL**, a trajectory-aware reinforcement learning method for diffusion language models, which demonstrates the best performance among RL approaches for DLMs. We also introduce a diffusion-based value model that reduces variance and improves stability during optimization.
+- `dynamic_threshold ∈ {0.70, 0.80, 0.85, 0.90, 0.95, 0.98}`
 
+## 快速开始
 
-<p align="center">
-  <img src="assets/sft.png" width="48%"/>
-  <img src="assets/rl.png" width="48%"/>
-</p>
-
-Based on TraceRL, we derive a series of diffusion language models, **TraDo**, which achieve state-of-the-art performance on math and coding reasoning tasks. TraDo-4B-Instruct and TraDo-8B-Instruct are trained solely with TraceRL, while the first long-CoT diffusion language model, TraDo-8B-Thinking, is obtained through a combination of TraceRL and long-CoT data SFT. TraDo models challenge AR models with strong empirical results, as shown in the following table.
-
-<p align="center">
-  <img src="assets/maintable.png"  alt="Main Table"  width="750">
-</p>
-
-We can download and try our model:
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from generate import block_diffusion_generate
-
-model_name = "Gen-Verse/TraDo-8B-Instruct"
-
-model = AutoModelForCausalLM.from_pretrained(
-    model_name, trust_remote_code=True, torch_dtype="float16", device_map="cuda"
-)
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-prompt = "What's the solution of x^2 - 2x + 1 = 0\nPlease reason step by step, and put your final answer within \\boxed{}.\n"
-messages = [{"role": "user", "content": prompt}]
-text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-tokens = tokenizer.batch_encode_plus([text], return_tensors='pt', padding=True, truncation=True, max_length=200)
-tokens = {k: v.to(model.device) for k, v in tokens.items()}
-
-output_ids = block_diffusion_generate(
-    model,
-    prompt=tokens,
-    mask_id=151669,
-    gen_length=200,
-    block_length=4, denoising_steps=4,
-    temperature=1.0, top_k=0, top_p=1.0,
-    remasking_strategy="low_confidence_dynamic",
-    confidence_threshold=0.9
-)
-
-output_text = tokenizer.decode(output_ids[0], skip_special_tokens=False)
-cleaned_text = output_text.replace('<|MASK|>', '').replace('<|endoftext|>', '')
-print(cleaned_text)
-
-
-```
-
-## 📰 Latest Updates
-* **[2026-01-26]** Our [TraceRL](https://openreview.net/forum?id=KNAyc9DMe3) paper has been accepted by ICLR 2026! 
-* **[2025-12-07]** 🔥 We support RLHF, fine-grained process reward, and multimodal RL/SFT now!
-* **[2025-09-08]** We release our models, [TraDo-4B-Instruct](https://huggingface.co/Gen-Verse/TraDo-4B-Instruct) and [TraDo-8B-Instruct](https://huggingface.co/Gen-Verse/TraDo-8B-Instruct), and the long-CoT diffusion language model [TraDo-8B-Thinking](https://huggingface.co/Gen-Verse/TraDo-8B-Thinking).
-* **[2025-09-08]** We release inference and training (SFT and RL) code compatible with a wide range of diffusion language models, including [TraDo](https://arxiv.org/abs/2509.06949), [SDAR](https://github.com/JetAstra/SDAR), [Dream](https://github.com/DreamLM/Dream), [LLaDA](https://github.com/ML-GSAI/LLaDA), [MMaDA](https://github.com/Gen-Verse/MMaDA), and [Diffu-Coder](https://github.com/apple/ml-diffucoder).
-
-
-## 🚀 Quick Start
-
+假设你已经把官方仓库 clone 到本地并装好依赖：
 
 ```bash
-conda create --name dllm-rl python=3.10
-source activate dllm-rl
-pip install torch==2.6.0
-pip install --no-cache-dir \
-  https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/\
-flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
-pip install -r requirements.txt
-# or requirements_v.txt for multimodal settings, see more details in the multimodal section in ./configs
+git clone https://github.com/Gen-Verse/dLLM-RL.git
+cd dLLM-RL
 ```
 
-
-## ⚙️ Data
-
-You can navigate to `./data` to download datasets for evaluation and training, for example as follows. In that directory, you will also find detailed instructions on how to modify your own dataset.
-```bash
-cd data
-python download_data.py --dataset MATH500
-python download_data.py --dataset MATH_train
-cd ..
-```
-
-After downloading the data, you are almost ready to evaluate or train diffusion language models. The only remaining step is to select (or create) a config file in `./configs` that corresponds to your project, and then use the following commands. Details on how to select and modify (or create) a config file are provided in `./configs`.
-
-
-## 📊 Inference & Evaluations
-
-After downloading the data, take TraDo models as an example. You can set the configurations in `configs/trado_eval.yaml` (see instructions and details in `./configs`) and run the following commands to perform inference with different sampling strategies.
-```bash
-python eval.py config=configs/trado_eval.yaml
-# python eval.py config=configs/trado_longcot_eval.yaml
-# python eval.py config=configs/sdar_eval.yaml
-# python eval.py config=configs/dream_eval.yaml
-# python eval.py config=configs/llada_eval.yaml
-# python eval_v.py config=configs/lladav_eval.yaml
-# python eval_v.py config=configs/mmada_v_eval.yaml
-# see details in ./configs
-```
-Use `trado_eval.yaml` for TraDo models' inference, `sdar_eval.yaml` for SDAR, `dream_eval.yaml` for Dream and Diffu-Coder, and `llada_eval.yaml` for LLaDA and MMaDA. Instructions on how to set the configurations are provided in the corresponding configuration files.  
-We support both general tasks and coding tasks (including automated execution of code) in evaluation.  
-
-There are two main sampling methods you can choose:
-
-**Static Sampling:** unmask fixed number of tokens each time
-
-**Dynamic Sampling:** unmask tokens based on a chosen threshold, faster than static
-
-To have a look how diffusion language models sample, open `./sample/trace.viewer.html` in your browser, or generate trajectory by your self with `./sample/get_trace_viewer.py`.
-
-
-You can also perform inference across multiple nodes using `multinode_eval.py` with the same configuration files, with only minor modifications as instructed in the configuration files.
-In multi-node setup, the first node controls the others. You can run  
-`python multinode_eval.py config=configs/dream_multinode_eval.yaml` on the first node to eval, or submit the following as the entry command for a job:
+### 1. 快速 smoke test
 
 ```bash
-if [[ ${MLP_ROLE_INDEX:-0} -eq 0 ]]; then   
-    python multinode_eval.py config=configs/dream_multinode_eval.yaml
-else
-    exec tail -f /dev/null
-fi
-# python multinode_eval.py config=configs/trado_longcot_multinode_eval.yaml
-# python multinode_eval.py config=configs/llada_multinode_eval.yaml
-# python multinode_eval_v.py config=configs/lladav_eval.yaml
-# python multinode_eval_v.py config=configs/mmada_v_eval.yaml
-# ...
+python /path/to/run_trado_ablations.py \
+  --repo-root /path/to/dLLM-RL \
+  --model /path/to/TraDo-8B-Thinking \
+  --datasets GSM8K MATH500 \
+  --subset-size 32 \
+  --max-token 4096 \
+  --max-active 2
 ```
 
+### 2. 正式实验
 
-## 🔧 Reinforcement Learning
-
-After downloading the data and model and setting the configuration, you can start reinforcement learning simply with:
 ```bash
-python rl.py config=configs/rl_trado.yaml
-# python rl.py config=configs/rl_sdar.yaml
-# python rl.py config=configs/rl_dream.yaml
-# python rl.py config=configs/rl_llada.yaml
-# python rl.py config=configs/rl_mmada.yaml
-# python rl_v.py config=configs/rl_lladav.yaml
-# python rl_v.py config=configs/rl_mmada_v.yaml
-# see details in ./configs
+python /path/to/run_trado_ablations.py \
+  --repo-root /path/to/dLLM-RL \
+  --model /path/to/TraDo-8B-Thinking \
+  --datasets GSM8K MATH500 \
+  --block-sizes 2,4,8,16 \
+  --parallel-thresholds 0.70,0.80,0.85,0.90,0.95,0.98 \
+  --parallel-base-block-size 4 \
+  --max-token 10000 \
+  --max-active 2 \
+  --tensor-parallel-size 1
 ```
 
-We support TraceRL (optionally with a diffusion-based value model), Coupled RL, and random masking RL across different diffusion language models. The sampling process has been accelerated in all cases by KV-cache.
+## 输出
 
-**TraceRL**: We optimize the policy based on how it generates sequences. For block-attention models, training can be performed efficiently thanks to block attention. For full-attention models, we introduce a shrinkage parameter, s, that aggregates every s neighboring steps to accelerate training. We also provide a choice of value models for TraceRL, which we find can reduce variance and improve training stability, enabling the use of larger learning rates or fewer gradient accumulation steps more reliably than without using value model.
+每个 sweep point 会写到：
 
+```text
+<repo-root>/runs/trado_ablation/<run-name>/<dataset>/<sweep>/<label>/
+```
 
-**Random Masking RL**: The sampled data are randomly masked and used as training data in RL with a PPO-like objective.
+包含：
 
+- `config.yaml`
+- `logs/sample.log`
+- `logs/reward.log`
+- `metrics.json`
 
-**Coupled RL**: For each sampled random masking setting, Coupled RL additionally introduces its complement, serving as an extra data sample for training.
+整体汇总会写到：
 
+```text
+<repo-root>/runs/trado_ablation/<run-name>/
+```
 
-We also support a multi-node RL framework; you can submit the following as the entry command:
+包含：
+
+- `summary.csv`
+- `summary.jsonl`
+- `plots/*.png`
+
+## 重点指标
+
+### throughput
+
+- `generation_wall_clock_sec`
+- `samples_per_sec`
+- `output_tokens_per_sec`
+
+### performance
+
+- `accuracy`
+- `avg_output_tokens`
+
+### realized parallelism
+
+当 `output_unmasking_history=True` 时，还会写：
+
+- `avg_decode_rounds`
+- `avg_realized_tokens_per_round`
+- `avg_first_unmask_round`
+
+推荐最后重点看：
+
+- `output_tokens_per_sec -> accuracy`
+- `avg_realized_tokens_per_round -> accuracy`
+
+## 单独重画图
+
 ```bash
-if [[ ${MLP_ROLE_INDEX:-0} -eq 0 ]]; then   
-    python multinode_rl.py config=configs/multinode_rl_trado.yaml
-else
-    exec tail -f /dev/null
-fi
-# python multinode_rl.py config=configs/multinode_rl_sdar.yaml
-# python multinode_rl.py config=configs/multinode_rl_dream.yaml
-# python multinode_rl.py config=configs/multinode_rl_llada.yaml
-# python multinode_rl.py config=configs/multinode_rl_mmada.yaml
-# python multinode_rl_v.py config=configs/multinode_rl_lladav.yaml
-# python multinode_rl_v.py config=configs/multinode_rl_mmada_v.yaml
+python /path/to/plot_trado_tradeoff.py \
+  --summary-csv /path/to/summary.csv \
+  --output-dir /path/to/plots
 ```
 
-## 🔧 Supervised Finetuning
+可选：
 
-After downloading the data and setting the configurations, you can start supervised fine-tuning with:
 ```bash
-accelerate launch \
-  --num_machines 1 \
-  --machine_rank 0 \
-  --main_process_ip 127.0.0.1 \
-  --main_process_port 8888 \
-  --config_file accelerate_configs/1_node_8_gpus_deepspeed_zero3.yaml \
-  train/sft_trado.py \
-  config=configs/sft_trado.yaml
-# sft_sdar.py, sft_sdar.yaml
-# sft_dream.py, sft_dream.yaml
-# sft_llada.py, sft_llada.yaml
-# sft_mmada.py, sft_mmada.yaml
-# sft_mmada_v.py, sft_mmada_v.yaml
-# sft_lladav.py, sft_lladav.yaml
-# see details in ./configs
+python /path/to/plot_trado_tradeoff.py \
+  --summary-csv /path/to/summary.csv \
+  --output-dir /path/to/plots \
+  --throughput-metric samples_per_sec
 ```
 
-We support different SFT strategies for different models.
+或：
 
-**Block diffusion models** (e.g., TraDo and SDAR): support semi-autoregressive fine-tuning or trace fine-tuning (requires setting a specific trace first).
-
-**Adapted full-attention models** (e.g., Dream and DiffuCoder): support the semi-autoregressive method (using sliced data), random-masking SFT, and AR training (i.e., standard SFT for LLMs).
-
-**Pretrained full-attention models** (e.g., LLaDA and MMaDA): support semi-autoregressive and random-masking SFT.
-
-
-
-To use multi-node, simply run:
 ```bash
-accelerate launch \
-  --num_machines $MLP_WORKER_NUM \
-  --machine_rank $MLP_ROLE_INDEX \
-  --main_process_ip $MLP_WORKER_0_HOST \
-  --main_process_port $MLP_WORKER_0_PORT \
-  --config_file accelerate_configs/4_node_8_gpus_deepspeed_zero3.yaml \
-  train/sft_dream.py \
-  config=configs/sft_dream.yaml
-# sft_trado.py, sft_trado.yaml
-# ...
+python /path/to/plot_trado_tradeoff.py \
+  --summary-csv /path/to/summary.csv \
+  --output-dir /path/to/plots \
+  --throughput-metric avg_realized_tokens_per_round
 ```
 
+## 默认 baseline（接近官方 long-CoT 配置）
 
-## 🤝 Acknowledgement
+- `block_size = 4`
+- `denoising_steps_per_block = 4`
+- `dynamic_threshold = 0.90`
+- `remasking_strategy = low_confidence_dynamic`
+- `start_with_think = True`
+- `num_response_per_task = 1`
+- `max_active = 2`
 
-This work is heavily built on the following open-source models:
+## 常见坑
 
-[SDAR](https://github.com/JetAstra/SDAR), [Dream](https://github.com/DreamLM/Dream), [LLaDA](https://github.com/ML-GSAI/LLaDA), [MMaDA](https://github.com/Gen-Verse/MMaDA/tree/main), [LLaDA-V](https://github.com/ML-GSAI/LLaDA-V), and [Diffu-coder](https://github.com/apple/ml-diffuCoder).
-
-these acceleration methods (engines):
-
-[Fast-dllm](https://github.com/NVlabs/Fast-dLLM/tree/main), [jetengine](https://github.com/Labman42/JetEngine/tree/0ddc55ad3fb712b6374515b78d656f420e1a7243),
-
-and theoretical foundations:
-
-[MDLM](https://arxiv.org/pdf/2406.07524), [DiffuLLaMA](https://arxiv.org/abs/2410.17891), [Block Diffusion](https://arxiv.org/abs/2503.09573).
-
-
-## 📖 Citation
-
-```
-@article{wang2025revolutionizing,
-  title={Revolutionizing reinforcement learning framework for diffusion large language models},
-  author={Wang, Yinjie and Yang, Ling and Li, Bowen and Tian, Ye and Shen, Ke and Wang, Mengdi},
-  journal={arXiv preprint arXiv:2509.06949},
-  year={2025}
-}
-```
-
-
-
-
-
+1. 不要在 block sweep 里把 `block_size` 改了，同时把 `denoising_steps_per_block` 固定死，除非你就是想把两种效应一起测。
+2. throughput 最好只统计 generation 阶段，不把 `reward.py` 的 symbolic checking 时间算进去。
+3. 样本太少时，模型加载时间会污染 throughput；scouting 建议至少 `subset-size=64/128`。
+4. 不要只盯着 `threshold`，更该看 `avg_realized_tokens_per_round`。

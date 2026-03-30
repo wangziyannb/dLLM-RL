@@ -110,7 +110,7 @@ class LLMEngine:
         #finished_outputs = [(seq.seq_id, seq.completion_token_ids) for seq in scheduled_seqs if seq.is_finished]
         
         finished_outputs = [
-            (seq.seq_id, seq.completion_token_ids, seq.first_unmask_steps)
+            (seq.seq_id, seq.completion_token_ids, seq.first_unmask_steps, seq.export_confidence_summary())
             for seq in scheduled_seqs
             if seq.is_finished
         ]
@@ -204,8 +204,12 @@ class LLMEngine:
 
                 #for seq_id, token_ids in output:
                 #    outputs[seq_id] = token_ids
-                for seq_id, token_ids, unmask_times in output:
-                    outputs[seq_id] = {"token_ids": token_ids, "unmask_times": unmask_times}
+                for seq_id, token_ids, unmask_times, confidence_summary in output:
+                    outputs[seq_id] = {
+                        "token_ids": token_ids,
+                        "unmask_times": unmask_times,
+                        "confidence_summary": confidence_summary,
+                    }
                     if use_tqdm:
                         pbar.update(1)
 
@@ -217,6 +221,7 @@ class LLMEngine:
                 "text": self._safe_decode(item["token_ids"]),
                 "token_ids": self._clean_token_ids(item["token_ids"]),
                 "first_unmask_times": item["unmask_times"],   # 与 token_ids 等长
+                "confidence_summary": item.get("confidence_summary"),
             }
             for item in outputs
         ]
@@ -299,8 +304,12 @@ class LLMEngine:
 
                 #for seq_id, token_ids in output:
                 #    outputs[seq_id] = token_ids
-                for seq_id, token_ids, unmask_times in output:
-                    outputs[seq_id] = {"token_ids": token_ids, "unmask_times": unmask_times}
+                for seq_id, token_ids, unmask_times, confidence_summary in output:
+                    outputs[seq_id] = {
+                        "token_ids": token_ids,
+                        "unmask_times": unmask_times,
+                        "confidence_summary": confidence_summary,
+                    }
 
         #outputs_list = [outputs[seq_id] for seq_id in sorted(outputs)]
         #results = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs_list]
@@ -310,6 +319,7 @@ class LLMEngine:
                 "text": self._safe_decode(item["token_ids"]),
                 "token_ids": self._clean_token_ids(item["token_ids"]),
                 "first_unmask_times": item["unmask_times"],
+                "confidence_summary": item.get("confidence_summary"),
             }
             for item in outputs_list
         ]

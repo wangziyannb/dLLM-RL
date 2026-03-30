@@ -96,8 +96,11 @@ class Scheduler:
                     current_block_tensor = torch.tensor(seq.intermediate_block_tokens, device=logits.device)
                     mask_index = (current_block_tensor == self.mask_token_id)
                     num_to_transfer = seq.num_transfer_tokens_per_step[seq.current_denoising_step]
+                    masked_probs = seq_x0_p[mask_index]
                     
                     transfer_index = torch.zeros_like(seq_x0, dtype=torch.bool)
+                    num_above_threshold: int | None = None
+                    fallback_triggered = False
                     
                     if seq.remasking_strategy == 'sequential':
                         if mask_index.any():
@@ -114,7 +117,9 @@ class Scheduler:
                     elif 'low_confidence_dynamic' in seq.remasking_strategy:
                         confidence = torch.where(mask_index, seq_x0_p, -np.inf)
                         transfer_index = torch.where(confidence > seq.dynamic_threshold, True, False)
-                        if sum(transfer_index) < num_to_transfer:
+                        num_above_threshold = int(transfer_index.sum().item())
+                        if num_above_threshold < num_to_transfer:
+                            fallback_triggered = True
                             _, top_indices = torch.topk(confidence, num_to_transfer)
                             transfer_index[top_indices] = True
                         num_to_transfer = transfer_index.sum().item() if transfer_index.sum().item() > 0 else num_to_transfer
@@ -137,7 +142,15 @@ class Scheduler:
                     # update
                     new_block_list = current_block_tensor.tolist()
                     accepted_tokens = seq_x0[transfer_index].tolist()
+                    accepted_probs = seq_x0_p[transfer_index]
                     original_indices = transfer_index.nonzero(as_tuple=True)[0].tolist()
+
+                    seq.record_denoise_round(
+                        masked_probs=masked_probs,
+                        accepted_probs=accepted_probs,
+                        num_above_threshold=num_above_threshold,
+                        fallback_triggered=fallback_triggered,
+                    )
 
 
 
@@ -167,6 +180,7 @@ class Scheduler:
                                         (seq.current_denoising_step >= seq.denoising_steps)
 
                     if is_fully_denoised:
+                        seq.record_completed_block()
                         # Block is done, commit it and check if generation is finished
                         seq.status = SequenceStatus.FINISHED if seq.is_finished else SequenceStatus.SAVING
                     seq.num_to_transfer = num_to_transfer
