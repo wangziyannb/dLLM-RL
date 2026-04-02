@@ -181,23 +181,38 @@ class Sequence:
 
 
     def commit_block(self, block_tokens: list[int]):
-        # 1) take token one by one, stop when EOS / reach max_tokens
+        # 1) Append the denoised block.
+        # Prompt tail tokens may live in the first block; they should never trigger
+        # stop/EOS handling or count against completion length limits.
         final_block = []
-        k = 0
-        for token_id in block_tokens:
+        before_ntok = self.num_tokens
+        prompt_gap = max(0, self.num_prompt_tokens - before_ntok)
+        confirmed_completion_tokens = max(0, before_ntok - self.num_prompt_tokens)
+        appended_tokens = 0
+        completion_tokens_added = 0
+
+        for block_idx, token_id in enumerate(block_tokens):
+            if block_idx < prompt_gap:
+                final_block.append(token_id)
+                appended_tokens += 1
+                continue
+
+            if confirmed_completion_tokens + completion_tokens_added >= self.max_tokens:
+                self.status = SequenceStatus.FINISHED
+                break
+
             if not self.ignore_eos and (token_id == self.eos_token_id or token_id in self.stop_words):
                 final_block.append(token_id)
-                k += 1
+                appended_tokens += 1
+                completion_tokens_added += 1
                 self.status = SequenceStatus.FINISHED
                 break
-            if self.num_completion_tokens + k >= self.max_tokens:
-                self.status = SequenceStatus.FINISHED
-                break
+
             final_block.append(token_id)
-            k += 1
+            appended_tokens += 1
+            completion_tokens_added += 1
 
         # 2) self.token_ids
-        before_ntok = self.num_tokens                     # pre length
         self.token_ids.extend(final_block)
         self.num_tokens = len(self.token_ids)
         self.intermediate_block_tokens = []
@@ -205,11 +220,10 @@ class Sequence:
         # 3) merge first unmask step into list
         # only completion 
         if self.block_first_unmask_steps is not None:
-            prompt_gap = max(0, self.num_prompt_tokens - before_ntok)
             # completion start index
-            start = min(prompt_gap, k)
-            if start < k:
-                self.first_unmask_steps.extend(self.block_first_unmask_steps[start:k])
+            start = min(prompt_gap, appended_tokens)
+            if start < appended_tokens:
+                self.first_unmask_steps.extend(self.block_first_unmask_steps[start:appended_tokens])
             self.block_first_unmask_steps = None
 
         if self.num_tokens >= self.num_prompt_tokens + self.max_tokens:
@@ -225,18 +239,9 @@ class Sequence:
         return self.num_tokens + self.block_length
 
     def num_new_blocks_needed(self, block_size: int) -> int:
-        if not self.block_table:
-            return (self.num_tokens + self.block_length + block_size - 1) // block_size
-
-        last_block_capacity = block_size - (self.num_tokens % block_size)
-        if last_block_capacity == block_size: # Current tokens perfectly fill blocks
-            last_block_capacity = 0
-        
-        remaining_tokens_to_add = self.block_length - last_block_capacity
-        if remaining_tokens_to_add <= 0:
-            return 0
-            
-        return (remaining_tokens_to_add + block_size - 1) // block_size
+        required_blocks = (self.num_tokens + self.block_length + block_size - 1) // block_size
+        reserved_blocks = len(self.block_table)
+        return max(0, required_blocks - reserved_blocks)
 
     @property
     def is_finished(self):
@@ -244,7 +249,7 @@ class Sequence:
 
     @property
     def num_completion_tokens(self):
-        return self.num_tokens - self.num_prompt_tokens
+        return max(0, self.num_tokens - self.num_prompt_tokens)
 
     @property
     def completion_token_ids(self):
