@@ -1,4 +1,5 @@
 import atexit
+import json
 from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
@@ -16,6 +17,10 @@ from jetengine_ext.engine.sequence import Sequence, RunType
 from jetengine_ext.engine.scheduler import Scheduler
 from jetengine_ext.engine.model_runner import ModelRunner
 from jetengine_ext.utils.loader import load_from_hf_model
+
+
+class SchedulerStallError(RuntimeError):
+    """Raised when sequences remain active but the scheduler cannot make progress."""
 
 
 class LLMEngine:
@@ -99,9 +104,58 @@ class LLMEngine:
         seq.eos_token_id = self.tokenizer.eos_token_id
         self.scheduler.add(seq)
 
+    def _build_scheduler_stall_diagnostics(self) -> str:
+        block_manager = getattr(self.scheduler, "block_manager", None)
+        block_size = getattr(block_manager, "block_size", None)
+        free_blocks = len(getattr(block_manager, "free_block_ids", [])) if block_manager is not None else None
+        used_blocks = len(getattr(block_manager, "used_block_ids", [])) if block_manager is not None else None
+
+        seq_summaries = []
+        for seq in getattr(self.scheduler, "running", []):
+            needed_blocks = None
+            if block_size is not None and hasattr(seq, "num_new_blocks_needed"):
+                needed_blocks = seq.num_new_blocks_needed(block_size)
+            block_table = getattr(seq, "block_table", [])
+            intermediate = getattr(seq, "intermediate_block_tokens", [])
+            mask_token_id = getattr(seq, "mask_token_id", None)
+            masked_tokens = None
+            if intermediate and mask_token_id is not None:
+                masked_tokens = sum(1 for token_id in intermediate if token_id == mask_token_id)
+            seq_summaries.append(
+                {
+                    "seq_id": getattr(seq, "seq_id", None),
+                    "status": getattr(getattr(seq, "status", None), "name", str(getattr(seq, "status", None))),
+                    "num_tokens": getattr(seq, "num_tokens", None),
+                    "num_prompt_tokens": getattr(seq, "num_prompt_tokens", None),
+                    "num_completion_tokens": getattr(seq, "num_completion_tokens", None),
+                    "num_cached_tokens": getattr(seq, "num_cached_tokens", None),
+                    "block_table_len": len(block_table),
+                    "block_length": getattr(seq, "block_length", None),
+                    "current_denoising_step": getattr(seq, "current_denoising_step", None),
+                    "denoising_steps": getattr(seq, "denoising_steps", None),
+                    "num_new_blocks_needed": needed_blocks,
+                    "masked_tokens_in_block": masked_tokens,
+                }
+            )
+
+        payload = {
+            "num_running": len(getattr(self.scheduler, "running", [])),
+            "free_kv_blocks": free_blocks,
+            "used_kv_blocks": used_blocks,
+            "kv_block_size": block_size,
+            "seq_summaries": seq_summaries,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
     def step(self):
         scheduled_seqs, run_type = self.scheduler.schedule()
         if scheduled_seqs is None:
+            if getattr(self.scheduler, "running", None):
+                raise SchedulerStallError(
+                    "Scheduler stalled: active sequences remain, but no batch can be scheduled.\n"
+                    "This usually means KV-cache exhaustion or another scheduling deadlock.\n"
+                    f"{self._build_scheduler_stall_diagnostics()}"
+                )
             return [], 0 # Nothing to run
 
         logits = self.model_runner.call("run", scheduled_seqs, run_type)
